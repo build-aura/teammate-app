@@ -21,11 +21,11 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const { id } = await params;
 
     // Get task with agent info
-    const task = queryOne<Task & { assigned_agent_name?: string; workspace_id: string }>(
+    const task = await queryOne<Task & { assigned_agent_name?: string; workspace_id: string }>(
       `SELECT t.*, a.name as assigned_agent_name, a.is_master
        FROM tasks t
        LEFT JOIN agents a ON t.assigned_agent_id = a.id
-       WHERE t.id = ?`,
+       WHERE t.id = $1`,
       [id]
     );
 
@@ -41,8 +41,8 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     }
 
     // Get agent details
-    const agent = queryOne<Agent>(
-      'SELECT * FROM agents WHERE id = ?',
+    const agent = await queryOne<Agent>(
+      'SELECT * FROM agents WHERE id = $1',
       [task.assigned_agent_id]
     );
 
@@ -53,16 +53,16 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // Check if dispatching to the master agent while there are other orchestrators available
     if (agent.is_master) {
       // Check for other master agents in the same workspace (excluding this one)
-      const otherOrchestrators = queryAll<{
+      const otherOrchestrators = await queryAll<{
         id: string;
         name: string;
         role: string;
       }>(
         `SELECT id, name, role
          FROM agents
-         WHERE is_master = 1
-         AND id != ?
-         AND workspace_id = ?
+         WHERE is_master = true
+         AND id != $1
+         AND workspace_id = $2
          AND status != 'offline'`,
         [agent.id, task.workspace_id]
       );
@@ -92,8 +92,8 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     }
 
     // Get or create OpenClaw session for this agent
-    let session = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+    let session = await queryOne<OpenClawSession>(
+      'SELECT * FROM openclaw_sessions WHERE agent_id = $1 AND status = $2',
       [agent.id, 'active']
     );
 
@@ -104,21 +104,21 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       const sessionId = uuidv4();
       const openclawSessionId = `mission-control-${agent.name.toLowerCase().replace(/\s+/g, '-')}`;
       
-      run(
+      await run(
         `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [sessionId, agent.id, openclawSessionId, 'mission-control', 'active', now, now]
       );
 
-      session = queryOne<OpenClawSession>(
-        'SELECT * FROM openclaw_sessions WHERE id = ?',
+      session = await queryOne<OpenClawSession>(
+        'SELECT * FROM openclaw_sessions WHERE id = $1',
         [sessionId]
       );
 
       // Log session creation
-      run(
+      await run(
         `INSERT INTO events (id, type, agent_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES ($1, $2, $3, $4, $5)`,
         [uuidv4(), 'agent_status_changed', agent.id, `${agent.name} session created`, now]
       );
     }
@@ -180,13 +180,13 @@ If you need help or clarification, ask the orchestrator.`;
       });
 
       // Update task status to in_progress
-      run(
-        'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
+      await run(
+        'UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3',
         ['in_progress', now, id]
       );
 
       // Broadcast task update
-      const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [id]);
+      const updatedTask = await queryOne<Task>('SELECT * FROM tasks WHERE id = $1', [id]);
       if (updatedTask) {
         broadcast({
           type: 'task_updated',
@@ -195,24 +195,24 @@ If you need help or clarification, ask the orchestrator.`;
       }
 
       // Update agent status to working
-      run(
-        'UPDATE agents SET status = ?, updated_at = ? WHERE id = ?',
+      await run(
+        'UPDATE agents SET status = $1, updated_at = $2 WHERE id = $3',
         ['working', now, agent.id]
       );
 
       // Log dispatch event to events table
       const eventId = uuidv4();
-      run(
+      await run(
         `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES ($1, $2, $3, $4, $5, $6)`,
         [eventId, 'task_dispatched', agent.id, task.id, `Task "${task.title}" dispatched to ${agent.name}`, now]
       );
 
       // Log dispatch activity to task_activities table (for Activity tab)
       const activityId = crypto.randomUUID();
-      run(
+      await run(
         `INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES ($1, $2, $3, $4, $5, $6)`,
         [activityId, task.id, agent.id, 'status_changed', `Task dispatched to ${agent.name} - Agent is now working on this task`, now]
       );
 

@@ -52,7 +52,7 @@ export async function GET() {
     }
 
     // Get all agents already imported from the gateway
-    const existingAgents = queryAll<Agent>(
+    const existingAgents = await queryAll<Agent>(
       `SELECT * FROM agents WHERE gateway_agent_id IS NOT NULL`
     );
     const importedGatewayIds = new Map(

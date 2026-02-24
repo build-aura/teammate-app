@@ -13,13 +13,13 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
 
-    const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
+    const agent = await queryOne<Agent>('SELECT * FROM agents WHERE id = $1', [id]);
     if (!agent) {
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     }
 
-    const session = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+    const session = await queryOne<OpenClawSession>(
+      'SELECT * FROM openclaw_sessions WHERE agent_id = $1 AND status = $2',
       [id, 'active']
     );
 
@@ -42,14 +42,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
 
-    const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
+    const agent = await queryOne<Agent>('SELECT * FROM agents WHERE id = $1', [id]);
     if (!agent) {
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     }
 
     // Check if already linked
-    const existingSession = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+    const existingSession = await queryOne<OpenClawSession>(
+      'SELECT * FROM openclaw_sessions WHERE agent_id = $1 AND status = $2',
       [id, 'active']
     );
     if (existingSession) {
@@ -90,21 +90,21 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const openclawSessionId = `mission-control-${agent.name.toLowerCase().replace(/\s+/g, '-')}`;
     const now = new Date().toISOString();
 
-    run(
+    await run(
       `INSERT INTO openclaw_sessions (id, agent_id, openclaw_session_id, channel, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       [sessionId, id, openclawSessionId, 'mission-control', 'active', now, now]
     );
 
     // Log event
-    run(
+    await run(
       `INSERT INTO events (id, type, agent_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5)`,
       [uuidv4(), 'agent_status_changed', id, `${agent.name} connected to OpenClaw Gateway`, now]
     );
 
-    const session = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE id = ?',
+    const session = await queryOne<OpenClawSession>(
+      'SELECT * FROM openclaw_sessions WHERE id = $1',
       [sessionId]
     );
 
@@ -123,13 +123,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
 
-    const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
+    const agent = await queryOne<Agent>('SELECT * FROM agents WHERE id = $1', [id]);
     if (!agent) {
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     }
 
-    const existingSession = queryOne<OpenClawSession>(
-      'SELECT * FROM openclaw_sessions WHERE agent_id = ? AND status = ?',
+    const existingSession = await queryOne<OpenClawSession>(
+      'SELECT * FROM openclaw_sessions WHERE agent_id = $1 AND status = $2',
       [id, 'active']
     );
 
@@ -142,15 +142,15 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     // Mark the session as inactive
     const now = new Date().toISOString();
-    run(
-      'UPDATE openclaw_sessions SET status = ?, updated_at = ? WHERE id = ?',
+    await run(
+      'UPDATE openclaw_sessions SET status = $1, updated_at = $2 WHERE id = $3',
       ['inactive', now, existingSession.id]
     );
 
     // Log event
-    run(
+    await run(
       `INSERT INTO events (id, type, agent_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5)`,
       [uuidv4(), 'agent_status_changed', id, `${agent.name} disconnected from OpenClaw Gateway`, now]
     );
 

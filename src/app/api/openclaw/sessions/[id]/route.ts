@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getOpenClawClient } from '@/lib/openclaw/client';
-import { getDb } from '@/lib/db';
+import { queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 
 interface RouteParams {
@@ -93,10 +93,11 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     const body = await request.json();
     const { status, ended_at } = body;
 
-    const db = getDb();
-
     // Find session by openclaw_session_id
-    const session = db.prepare('SELECT * FROM openclaw_sessions WHERE openclaw_session_id = ?').get(id) as any;
+    const session = await queryOne<any>(
+      'SELECT * FROM openclaw_sessions WHERE openclaw_session_id = $1',
+      [id]
+    );
 
     if (!session) {
       return NextResponse.json(
@@ -108,14 +109,15 @@ export async function PATCH(request: Request, { params }: RouteParams) {
     // Update session
     const updates: string[] = [];
     const values: unknown[] = [];
+    let paramIndex = 1;
 
     if (status !== undefined) {
-      updates.push('status = ?');
+      updates.push(`status = $${paramIndex++}`);
       values.push(status);
     }
 
     if (ended_at !== undefined) {
-      updates.push('ended_at = ?');
+      updates.push(`ended_at = $${paramIndex++}`);
       values.push(ended_at);
     }
 
@@ -123,18 +125,27 @@ export async function PATCH(request: Request, { params }: RouteParams) {
       return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
     }
 
-    updates.push('updated_at = ?');
+    updates.push(`updated_at = $${paramIndex++}`);
     values.push(new Date().toISOString());
     values.push(session.id);
 
-    db.prepare(`UPDATE openclaw_sessions SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+    await run(
+      `UPDATE openclaw_sessions SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+      values
+    );
 
-    const updatedSession = db.prepare('SELECT * FROM openclaw_sessions WHERE id = ?').get(session.id);
+    const updatedSession = await queryOne(
+      'SELECT * FROM openclaw_sessions WHERE id = $1',
+      [session.id]
+    );
 
     // If status changed to completed, update the agent status too
     if (status === 'completed') {
       if (session.agent_id) {
-        db.prepare('UPDATE agents SET status = ? WHERE id = ?').run('idle', session.agent_id);
+        await run(
+          'UPDATE agents SET status = $1 WHERE id = $2',
+          ['idle', session.agent_id]
+        );
       }
       if (session.task_id) {
         broadcast({
@@ -161,13 +172,18 @@ export async function PATCH(request: Request, { params }: RouteParams) {
 export async function DELETE(request: Request, { params }: RouteParams) {
   try {
     const { id } = await params;
-    const db = getDb();
 
     // Find session by openclaw_session_id or internal id
-    let session = db.prepare('SELECT * FROM openclaw_sessions WHERE openclaw_session_id = ?').get(id) as any;
+    let session = await queryOne<any>(
+      'SELECT * FROM openclaw_sessions WHERE openclaw_session_id = $1',
+      [id]
+    );
 
     if (!session) {
-      session = db.prepare('SELECT * FROM openclaw_sessions WHERE id = ?').get(id) as any;
+      session = await queryOne<any>(
+        'SELECT * FROM openclaw_sessions WHERE id = $1',
+        [id]
+      );
     }
 
     if (!session) {
@@ -181,16 +197,22 @@ export async function DELETE(request: Request, { params }: RouteParams) {
     const agentId = session.agent_id;
 
     // Delete the session
-    db.prepare('DELETE FROM openclaw_sessions WHERE id = ?').run(session.id);
+    await run('DELETE FROM openclaw_sessions WHERE id = $1', [session.id]);
 
     // If there's an associated agent that was auto-created (role = 'Sub-Agent'), delete it too
     if (agentId) {
-      const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(agentId) as any;
+      const agent = await queryOne<any>(
+        'SELECT * FROM agents WHERE id = $1',
+        [agentId]
+      );
       if (agent && agent.role === 'Sub-Agent') {
-        db.prepare('DELETE FROM agents WHERE id = ?').run(agentId);
+        await run('DELETE FROM agents WHERE id = $1', [agentId]);
       } else if (agent) {
         // Update non-subagent back to idle
-        db.prepare('UPDATE agents SET status = ? WHERE id = ?').run('idle', agentId);
+        await run(
+          'UPDATE agents SET status = $1 WHERE id = $2',
+          ['idle', agentId]
+        );
       }
     }
 

@@ -14,20 +14,21 @@ export async function GET(request: NextRequest) {
     if (sessionType || status) {
       let sql = 'SELECT * FROM openclaw_sessions WHERE 1=1';
       const params: unknown[] = [];
+      let paramIndex = 1;
 
       if (sessionType) {
-        sql += ' AND session_type = ?';
+        sql += ` AND session_type = $${paramIndex++}`;
         params.push(sessionType);
       }
 
       if (status) {
-        sql += ' AND status = ?';
+        sql += ` AND status = $${paramIndex++}`;
         params.push(status);
       }
 
       sql += ' ORDER BY created_at DESC';
 
-      const sessions = queryAll<OpenClawSession>(sql, params);
+      const sessions = await queryAll<OpenClawSession>(sql, params);
       return NextResponse.json(sessions);
     }
 

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryOne, run, getDb, queryAll } from '@/lib/db';
+import { queryOne, run, queryAll, transaction } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { broadcast } from '@/lib/events';
 import { extractJSON, getMessagesFromOpenClaw } from '@/lib/planning-utils';
@@ -19,41 +19,40 @@ if (isNaN(PLANNING_POLL_INTERVAL_MS) || PLANNING_POLL_INTERVAL_MS < 100) {
 
 // Helper to handle planning completion with proper error handling and rollback
 async function handlePlanningCompletion(taskId: string, parsed: any, messages: any[]) {
-  const db = getDb();
   let dispatchError: string | null = null;
   let firstAgentId: string | null = null;
 
   // Wrap all database operations in a transaction for atomicity
   // Set status to 'pending_dispatch' first - don't mark as complete until dispatch succeeds
-  const transaction = db.transaction(() => {
-    // Update task with completion data but keep planning_complete = 0 until dispatch succeeds
-    db.prepare(`
+  firstAgentId = await transaction(async (query) => {
+    // Update task with completion data but keep planning_complete = false until dispatch succeeds
+    await query(`
       UPDATE tasks
-      SET planning_messages = ?,
-          planning_spec = ?,
-          planning_agents = ?,
+      SET planning_messages = $1,
+          planning_spec = $2,
+          planning_agents = $3,
           status = 'pending_dispatch',
           planning_dispatch_error = NULL
-      WHERE id = ?
-    `).run(
+      WHERE id = $4
+    `, [
       JSON.stringify(messages),
       JSON.stringify(parsed.spec),
       JSON.stringify(parsed.agents),
       taskId
-    );
+    ]);
+
+    let localFirstAgentId: string | null = null;
 
     // Create the agents in the workspace and track first agent for auto-assign
     if (parsed.agents && parsed.agents.length > 0) {
-      const insertAgent = db.prepare(`
-        INSERT INTO agents (id, workspace_id, name, role, description, avatar_emoji, status, soul_md, created_at, updated_at)
-        VALUES (?, (SELECT workspace_id FROM tasks WHERE id = ?), ?, ?, ?, ?, 'standby', ?, datetime('now'), datetime('now'))
-      `);
-
       for (const agent of parsed.agents) {
         const agentId = crypto.randomUUID();
-        if (!firstAgentId) firstAgentId = agentId;
+        if (!localFirstAgentId) localFirstAgentId = agentId;
 
-        insertAgent.run(
+        await query(`
+          INSERT INTO agents (id, workspace_id, name, role, description, avatar_emoji, status, soul_md, created_at, updated_at)
+          VALUES ($1, (SELECT workspace_id FROM tasks WHERE id = $2), $3, $4, $5, $6, 'standby', $7, NOW(), NOW())
+        `, [
           agentId,
           taskId,
           agent.name,
@@ -61,30 +60,27 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
           agent.instructions || '',
           agent.avatar_emoji || '🤖',
           agent.soul_md || ''
-        );
+        ]);
       }
     }
 
-    return firstAgentId;
+    return localFirstAgentId;
   });
-
-  // Execute the transaction to create agents and set pending_dispatch status
-  firstAgentId = transaction();
 
   // Re-check for other orchestrators before dispatching (prevents race condition)
   if (firstAgentId) {
-    const task = queryOne<{ workspace_id: string }>('SELECT workspace_id FROM tasks WHERE id = ?', [taskId]);
+    const task = await queryOne<{ workspace_id: string }>('SELECT workspace_id FROM tasks WHERE id = $1', [taskId]);
     if (task) {
-      const defaultMaster = queryOne<{ id: string }>(
-        `SELECT id FROM agents WHERE is_master = 1 AND workspace_id = ? ORDER BY created_at ASC LIMIT 1`,
+      const defaultMaster = await queryOne<{ id: string }>(
+        `SELECT id FROM agents WHERE is_master = true AND workspace_id = $1 ORDER BY created_at ASC LIMIT 1`,
         [task.workspace_id]
       );
-      const otherOrchestrators = queryAll<{ id: string; name: string }>(
+      const otherOrchestrators = await queryAll<{ id: string; name: string }>(
         `SELECT id, name
          FROM agents
-         WHERE is_master = 1
-         AND id != ?
-         AND workspace_id = ?
+         WHERE is_master = true
+         AND id != $1
+         AND workspace_id = $2
          AND status != 'offline'`,
         [defaultMaster?.id ?? '', task.workspace_id]
       );
@@ -100,8 +96,8 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
   // Check if task is already assigned (idempotency - prevents duplicate dispatches from multiple polls)
   let skipDispatch = false;
   if (firstAgentId) {
-    const currentTask = queryOne<{ assigned_agent_id?: string }>(
-      'SELECT assigned_agent_id FROM tasks WHERE id = ?',
+    const currentTask = await queryOne<{ assigned_agent_id?: string }>(
+      'SELECT assigned_agent_id FROM tasks WHERE id = $1',
       [taskId]
     );
     if (currentTask?.assigned_agent_id) {
@@ -138,42 +134,42 @@ async function handlePlanningCompletion(taskId: string, parsed: any, messages: a
   }
 
   // Final transaction: mark as complete or store error for retry
-  db.transaction(() => {
+  await transaction(async (query) => {
     if (dispatchError) {
       // Store the error but don't mark as complete - user can retry
-      db.prepare(`
+      await query(`
         UPDATE tasks
-        SET planning_dispatch_error = ?,
-            updated_at = datetime('now')
-        WHERE id = ?
-      `).run(dispatchError, taskId);
+        SET planning_dispatch_error = $1,
+            updated_at = NOW()
+        WHERE id = $2
+      `, [dispatchError, taskId]);
     } else if (firstAgentId) {
       // Success - mark complete and assign
-      db.prepare(`
+      await query(`
         UPDATE tasks
-        SET planning_complete = 1,
-            assigned_agent_id = ?,
+        SET planning_complete = true,
+            assigned_agent_id = $1,
             status = 'inbox',
             planning_dispatch_error = NULL,
-            updated_at = datetime('now')
-        WHERE id = ?
-      `).run(firstAgentId, taskId);
+            updated_at = NOW()
+        WHERE id = $2
+      `, [firstAgentId, taskId]);
       console.log(`[Planning Poll] Planning complete and dispatched to agent ${firstAgentId}`);
     } else {
       // No agent to dispatch to, but planning is complete
-      db.prepare(`
+      await query(`
         UPDATE tasks
-        SET planning_complete = 1,
+        SET planning_complete = true,
             status = 'inbox',
             planning_dispatch_error = NULL,
-            updated_at = datetime('now')
-        WHERE id = ?
-      `).run(taskId);
+            updated_at = NOW()
+        WHERE id = $1
+      `, [taskId]);
     }
-  })();
+  });
 
   // Broadcast task update
-  const updatedTask = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+  const updatedTask = await queryOne<Task>('SELECT * FROM tasks WHERE id = $1', [taskId]);
   if (updatedTask) {
     broadcast({
       type: 'task_updated',
@@ -192,13 +188,13 @@ export async function GET(
   const { id: taskId } = await params;
 
   try {
-    const task = queryOne<{
+    const task = await queryOne<{
       id: string;
       planning_session_key?: string;
       planning_messages?: string;
-      planning_complete?: number;
+      planning_complete?: boolean;
       planning_dispatch_error?: string;
-    }>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    }>('SELECT * FROM tasks WHERE id = $1', [taskId]);
 
     if (!task || !task.planning_session_key) {
       return NextResponse.json({ error: 'Planning session not found' }, { status: 404 });
@@ -293,7 +289,7 @@ export async function GET(
       console.log('[Planning Poll] Returning updates: currentQuestion =', currentQuestion ? 'YES' : 'NO');
 
       // Update database
-      run('UPDATE tasks SET planning_messages = ? WHERE id = ?', [JSON.stringify(messages), taskId]);
+      await run('UPDATE tasks SET planning_messages = $1 WHERE id = $2', [JSON.stringify(messages), taskId]);
 
       return NextResponse.json({
         hasUpdates: true,

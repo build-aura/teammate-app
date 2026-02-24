@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryOne, run, getDb } from '@/lib/db';
+import { queryOne, run, transaction } from '@/lib/db';
 import { triggerAutoDispatch } from '@/lib/auto-dispatch';
 
 /**
@@ -16,15 +16,15 @@ export async function POST(
 
   try {
     // Get task details
-    const task = queryOne<{
+    const task = await queryOne<{
       id: string;
       title: string;
       assigned_agent_id?: string;
       workspace_id?: string;
-      planning_complete?: number;
+      planning_complete?: boolean;
       planning_dispatch_error?: string;
       status: string;
-    }>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    }>('SELECT * FROM tasks WHERE id = $1', [taskId]);
 
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
@@ -45,7 +45,7 @@ export async function POST(
     }
 
     // Get agent name for logging
-    const agent = queryOne<{ name: string }>('SELECT name FROM agents WHERE id = ?', [task.assigned_agent_id]);
+    const agent = await queryOne<{ name: string }>('SELECT name FROM agents WHERE id = $1', [task.assigned_agent_id]);
 
     // Trigger the dispatch
     const result = await triggerAutoDispatch({
@@ -57,30 +57,27 @@ export async function POST(
     });
 
     // Use transaction to ensure atomic updates
-    const db = getDb();
-    const transaction = db.transaction(() => {
+    await transaction(async (query) => {
       if (result.success) {
         // Update task status on success
-        run(`
+        await query(`
           UPDATE tasks 
           SET status = 'inbox',
               planning_dispatch_error = NULL,
-              updated_at = datetime('now')
-          WHERE id = ?
+              updated_at = NOW()
+          WHERE id = $1
         `, [taskId]);
       } else {
         // Store the error for display, keep as 'pending_dispatch'
-        run(`
+        await query(`
           UPDATE tasks 
-          SET planning_dispatch_error = ?,
+          SET planning_dispatch_error = $1,
               status = 'pending_dispatch',
-              updated_at = datetime('now')
-          WHERE id = ?
+              updated_at = NOW()
+          WHERE id = $2
         `, [result.error, taskId]);
       }
     });
-
-    transaction();
 
     if (result.success) {
       return NextResponse.json({ 
@@ -98,11 +95,11 @@ export async function POST(
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     
     // Store the error in the database for user display
-    run(`
+    await run(`
       UPDATE tasks 
-      SET planning_dispatch_error = ?,
-          updated_at = datetime('now')
-      WHERE id = ?
+      SET planning_dispatch_error = $1,
+          updated_at = NOW()
+      WHERE id = $2
     `, [`Retry error: ${errorMessage}`, taskId]);
 
     return NextResponse.json({ 

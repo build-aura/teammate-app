@@ -1,62 +1,84 @@
-import Database from 'better-sqlite3';
-import path from 'path';
-import fs from 'fs';
+import { Pool, PoolClient } from 'pg';
 import { schema } from './schema';
 import { runMigrations } from './migrations';
 
-const DB_PATH = process.env.DATABASE_PATH || path.join(process.cwd(), 'mission-control.db');
+// Singleton pool pattern for Next.js — prevents connection exhaustion during HMR in dev
+declare global {
+  var _pgPool: Pool | undefined;
+}
 
-let db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-  if (!db) {
-    const isNewDb = !fs.existsSync(DB_PATH);
-    
-    db = new Database(DB_PATH);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
-
-    // Initialize base schema (creates tables if they don't exist)
-    db.exec(schema);
-
-    // Run migrations for schema updates
-    // This handles both new and existing databases
-    runMigrations(db);
-    
-    if (isNewDb) {
-      console.log('[DB] New database created at:', DB_PATH);
-    }
+function getPool(): Pool {
+  if (!global._pgPool) {
+    global._pgPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: process.env.NODE_ENV === 'production' ? 10 : 3,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
+    });
+    global._pgPool.on('error', (err) => {
+      console.error('Postgres pool error:', err);
+    });
   }
-  return db;
+  return global._pgPool;
 }
 
-export function closeDb(): void {
-  if (db) {
-    db.close();
-    db = null;
+const pool = getPool();
+
+// Track whether schema initialization has been done this process lifecycle
+let initialized = false;
+
+async function ensureInitialized(): Promise<void> {
+  if (initialized) return;
+  initialized = true;
+  // Create base schema tables (IF NOT EXISTS — safe to run multiple times)
+  await pool.query(schema);
+  // Run any pending migrations
+  await runMigrations(pool);
+  console.log('[DB] Postgres initialized');
+}
+
+// Type-safe async query helpers
+export async function queryAll<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  await ensureInitialized();
+  const result = await pool.query(sql, params);
+  return result.rows as T[];
+}
+
+export async function queryOne<T>(sql: string, params: unknown[] = []): Promise<T | undefined> {
+  await ensureInitialized();
+  const result = await pool.query(sql, params);
+  return result.rows[0] as T | undefined;
+}
+
+export async function run(sql: string, params: unknown[] = []): Promise<void> {
+  await ensureInitialized();
+  await pool.query(sql, params);
+}
+
+// Transaction helper — passes a query function bound to a single client
+// so all queries in the transaction share the same connection (required for ROLLBACK)
+export async function transaction<T>(
+  fn: (query: (sql: string, params?: unknown[]) => Promise<any>) => Promise<T>
+): Promise<T> {
+  await ensureInitialized();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn((sql, params) => client.query(sql, params ?? []));
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
   }
 }
 
-// Type-safe query helpers
-export function queryAll<T>(sql: string, params: unknown[] = []): T[] {
-  const stmt = getDb().prepare(sql);
-  return stmt.all(...params) as T[];
-}
-
-export function queryOne<T>(sql: string, params: unknown[] = []): T | undefined {
-  const stmt = getDb().prepare(sql);
-  return stmt.get(...params) as T | undefined;
-}
-
-export function run(sql: string, params: unknown[] = []): Database.RunResult {
-  const stmt = getDb().prepare(sql);
-  return stmt.run(...params);
-}
-
-export function transaction<T>(fn: () => T): T {
-  const db = getDb();
-  return db.transaction(fn)();
+// Export for direct pool access (rare cases)
+export function getPool_(): Pool {
+  return pool;
 }
 
 // Export migration utilities for CLI use
-export { runMigrations, getMigrationStatus } from './migrations';
+export { runMigrations } from './migrations';

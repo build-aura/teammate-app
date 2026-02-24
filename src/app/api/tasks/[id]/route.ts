@@ -13,13 +13,13 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const task = queryOne<Task>(
+    const task = await queryOne<Task>(
       `SELECT t.*,
         aa.name as assigned_agent_name,
         aa.avatar_emoji as assigned_agent_emoji
        FROM tasks t
        LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
-       WHERE t.id = ?`,
+       WHERE t.id = $1`,
       [id]
     );
 
@@ -54,7 +54,7 @@ export async function PATCH(
 
     const validatedData = validation.data;
 
-    const existing = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [id]);
+    const existing = await queryOne<Task>('SELECT * FROM tasks WHERE id = $1', [id]);
     if (!existing) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
@@ -62,13 +62,14 @@ export async function PATCH(
     const updates: string[] = [];
     const values: unknown[] = [];
     const now = new Date().toISOString();
+    let paramIndex = 1;
 
     // Workflow enforcement for agent-initiated approvals
     // If an agent is trying to move review→done, they must be a master agent
     // User-initiated moves (no agent ID) are allowed
     if (validatedData.status === 'done' && existing.status === 'review' && validatedData.updated_by_agent_id) {
-      const updatingAgent = queryOne<Agent>(
-        'SELECT is_master FROM agents WHERE id = ?',
+      const updatingAgent = await queryOne<Agent>(
+        'SELECT is_master FROM agents WHERE id = $1',
         [validatedData.updated_by_agent_id]
       );
 
@@ -81,19 +82,19 @@ export async function PATCH(
     }
 
     if (validatedData.title !== undefined) {
-      updates.push('title = ?');
+      updates.push(`title = $${paramIndex++}`);
       values.push(validatedData.title);
     }
     if (validatedData.description !== undefined) {
-      updates.push('description = ?');
+      updates.push(`description = $${paramIndex++}`);
       values.push(validatedData.description);
     }
     if (validatedData.priority !== undefined) {
-      updates.push('priority = ?');
+      updates.push(`priority = $${paramIndex++}`);
       values.push(validatedData.priority);
     }
     if (validatedData.due_date !== undefined) {
-      updates.push('due_date = ?');
+      updates.push(`due_date = $${paramIndex++}`);
       values.push(validatedData.due_date);
     }
 
@@ -102,7 +103,7 @@ export async function PATCH(
 
     // Handle status change
     if (validatedData.status !== undefined && validatedData.status !== existing.status) {
-      updates.push('status = ?');
+      updates.push(`status = $${paramIndex++}`);
       values.push(validatedData.status);
 
       // Auto-dispatch when moving to assigned
@@ -112,24 +113,24 @@ export async function PATCH(
 
       // Log status change event
       const eventType = validatedData.status === 'done' ? 'task_completed' : 'task_status_changed';
-      run(
+      await run(
         `INSERT INTO events (id, type, task_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES ($1, $2, $3, $4, $5)`,
         [uuidv4(), eventType, id, `Task "${existing.title}" moved to ${validatedData.status}`, now]
       );
     }
 
     // Handle assignment change
     if (validatedData.assigned_agent_id !== undefined && validatedData.assigned_agent_id !== existing.assigned_agent_id) {
-      updates.push('assigned_agent_id = ?');
+      updates.push(`assigned_agent_id = $${paramIndex++}`);
       values.push(validatedData.assigned_agent_id);
 
       if (validatedData.assigned_agent_id) {
-        const agent = queryOne<Agent>('SELECT name FROM agents WHERE id = ?', [validatedData.assigned_agent_id]);
+        const agent = await queryOne<Agent>('SELECT name FROM agents WHERE id = $1', [validatedData.assigned_agent_id]);
         if (agent) {
-          run(
+          await run(
             `INSERT INTO events (id, type, agent_id, task_id, message, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
+             VALUES ($1, $2, $3, $4, $5, $6)`,
             [uuidv4(), 'task_assigned', validatedData.assigned_agent_id, id, `"${existing.title}" assigned to ${agent.name}`, now]
           );
 
@@ -145,14 +146,14 @@ export async function PATCH(
       return NextResponse.json({ error: 'No updates provided' }, { status: 400 });
     }
 
-    updates.push('updated_at = ?');
+    updates.push(`updated_at = $${paramIndex++}`);
     values.push(now);
     values.push(id);
 
-    run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = ?`, values);
+    await run(`UPDATE tasks SET ${updates.join(', ')} WHERE id = $${paramIndex}`, values);
 
     // Fetch updated task with all joined fields
-    const task = queryOne<Task>(
+    const task = await queryOne<Task>(
       `SELECT t.*,
         aa.name as assigned_agent_name,
         aa.avatar_emoji as assigned_agent_emoji,
@@ -161,7 +162,7 @@ export async function PATCH(
        FROM tasks t
        LEFT JOIN agents aa ON t.assigned_agent_id = aa.id
        LEFT JOIN agents ca ON t.created_by_agent_id = ca.id
-       WHERE t.id = ?`,
+       WHERE t.id = $1`,
       [id]
     );
 
@@ -199,7 +200,7 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const existing = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [id]);
+    const existing = await queryOne<Task>('SELECT * FROM tasks WHERE id = $1', [id]);
 
     if (!existing) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
@@ -207,13 +208,13 @@ export async function DELETE(
 
     // Delete or nullify related records first (foreign key constraints)
     // Note: task_activities and task_deliverables have ON DELETE CASCADE
-    run('DELETE FROM openclaw_sessions WHERE task_id = ?', [id]);
-    run('DELETE FROM events WHERE task_id = ?', [id]);
+    await run('DELETE FROM openclaw_sessions WHERE task_id = $1', [id]);
+    await run('DELETE FROM events WHERE task_id = $1', [id]);
     // Conversations reference tasks - nullify or delete
-    run('UPDATE conversations SET task_id = NULL WHERE task_id = ?', [id]);
+    await run('UPDATE conversations SET task_id = NULL WHERE task_id = $1', [id]);
 
     // Now delete the task (cascades to task_activities and task_deliverables)
-    run('DELETE FROM tasks WHERE id = ?', [id]);
+    await run('DELETE FROM tasks WHERE id = $1', [id]);
 
     // Broadcast deletion via SSE
     broadcast({

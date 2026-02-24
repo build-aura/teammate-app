@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { queryOne, run } from '@/lib/db';
 import { getOpenClawClient } from '@/lib/openclaw/client';
 import { extractJSON } from '@/lib/planning-utils';
 
@@ -19,13 +19,13 @@ export async function POST(
     }
 
     // Get task
-    const task = getDb().prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as {
+    const task = await queryOne<{
       id: string;
       title: string;
       description: string;
       planning_session_key?: string;
       planning_messages?: string;
-    } | undefined;
+    }>('SELECT * FROM tasks WHERE id = $1', [taskId]);
 
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
@@ -108,9 +108,9 @@ If planning is complete, respond with JSON:
     }
 
     // Update messages in DB
-    getDb().prepare(`
-      UPDATE tasks SET planning_messages = ? WHERE id = ?
-    `).run(JSON.stringify(messages), taskId);
+    await run(`
+      UPDATE tasks SET planning_messages = $1 WHERE id = $2
+    `, [JSON.stringify(messages), taskId]);
 
     // Poll for response via OpenClaw API - removed aggressive polling
     // Return immediately and let frontend poll for updates

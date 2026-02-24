@@ -10,11 +10,11 @@ export async function GET(request: NextRequest) {
     
     let agents: Agent[];
     if (workspaceId) {
-      agents = queryAll<Agent>(`
-        SELECT * FROM agents WHERE workspace_id = ? ORDER BY is_master DESC, name ASC
+      agents = await queryAll<Agent>(`
+        SELECT * FROM agents WHERE workspace_id = $1 ORDER BY is_master DESC, name ASC
       `, [workspaceId]);
     } else {
-      agents = queryAll<Agent>(`
+      agents = await queryAll<Agent>(`
         SELECT * FROM agents ORDER BY is_master DESC, name ASC
       `);
     }
@@ -37,16 +37,16 @@ export async function POST(request: NextRequest) {
     const id = uuidv4();
     const now = new Date().toISOString();
 
-    run(
+    await run(
       `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id, soul_md, user_md, agents_md, model, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
       [
         id,
         body.name,
         body.role,
         body.description || null,
         body.avatar_emoji || '🤖',
-        body.is_master ? 1 : 0,
+        body.is_master ? true : false,
         (body as { workspace_id?: string }).workspace_id || 'default',
         body.soul_md || null,
         body.user_md || null,
@@ -58,13 +58,13 @@ export async function POST(request: NextRequest) {
     );
 
     // Log event
-    run(
+    await run(
       `INSERT INTO events (id, type, agent_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5)`,
       [uuidv4(), 'agent_joined', id, `${body.name} joined the team`, now]
     );
 
-    const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
+    const agent = await queryOne<Agent>('SELECT * FROM agents WHERE id = $1', [id]);
     return NextResponse.json(agent, { status: 201 });
   } catch (error) {
     console.error('Failed to create agent:', error);

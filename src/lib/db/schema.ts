@@ -1,9 +1,10 @@
 /**
- * Database Schema for Mission Control
- * 
+ * Database Schema for Mission Control (Postgres)
+ *
  * This defines the current desired schema state.
+ * All tables use IF NOT EXISTS — safe to run on every startup.
  * For existing databases, migrations handle schema updates.
- * 
+ *
  * IMPORTANT: When adding new tables or columns:
  * 1. Add them here for new databases
  * 2. Create a migration in migrations.ts for existing databases
@@ -17,8 +18,8 @@ CREATE TABLE IF NOT EXISTS workspaces (
   slug TEXT NOT NULL UNIQUE,
   description TEXT,
   icon TEXT DEFAULT '📁',
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Agents table
@@ -29,7 +30,7 @@ CREATE TABLE IF NOT EXISTS agents (
   description TEXT,
   avatar_emoji TEXT DEFAULT '🤖',
   status TEXT DEFAULT 'standby' CHECK (status IN ('standby', 'working', 'offline')),
-  is_master INTEGER DEFAULT 0,
+  is_master BOOLEAN DEFAULT false,
   workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id),
   soul_md TEXT,
   user_md TEXT,
@@ -37,8 +38,8 @@ CREATE TABLE IF NOT EXISTS agents (
   model TEXT,
   source TEXT DEFAULT 'local',
   gateway_agent_id TEXT,
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Tasks table (Mission Queue)
@@ -55,12 +56,12 @@ CREATE TABLE IF NOT EXISTS tasks (
   due_date TEXT,
   planning_session_key TEXT,
   planning_messages TEXT,
-  planning_complete INTEGER DEFAULT 0,
+  planning_complete BOOLEAN DEFAULT false,
   planning_spec TEXT,
   planning_agents TEXT,
   planning_dispatch_error TEXT,
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Planning questions table
@@ -74,7 +75,7 @@ CREATE TABLE IF NOT EXISTS planning_questions (
   answer TEXT,
   answered_at TEXT,
   sort_order INTEGER DEFAULT 0,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Planning specs table (locked specifications)
@@ -82,9 +83,9 @@ CREATE TABLE IF NOT EXISTS planning_specs (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
   spec_markdown TEXT NOT NULL,
-  locked_at TEXT NOT NULL,
+  locked_at TIMESTAMP NOT NULL,
   locked_by TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Conversations table (agent-to-agent or task-related)
@@ -93,15 +94,15 @@ CREATE TABLE IF NOT EXISTS conversations (
   title TEXT,
   type TEXT DEFAULT 'direct' CHECK (type IN ('direct', 'group', 'task')),
   task_id TEXT REFERENCES tasks(id),
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Conversation participants
 CREATE TABLE IF NOT EXISTS conversation_participants (
   conversation_id TEXT REFERENCES conversations(id) ON DELETE CASCADE,
   agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-  joined_at TEXT DEFAULT (datetime('now')),
+  joined_at TIMESTAMP DEFAULT NOW(),
   PRIMARY KEY (conversation_id, agent_id)
 );
 
@@ -113,7 +114,7 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL,
   message_type TEXT DEFAULT 'text' CHECK (message_type IN ('text', 'system', 'task_update', 'file')),
   metadata TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Events table (for live feed)
@@ -124,7 +125,7 @@ CREATE TABLE IF NOT EXISTS events (
   task_id TEXT REFERENCES tasks(id),
   message TEXT NOT NULL,
   metadata TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Businesses/Workspaces table (legacy - kept for compatibility)
@@ -132,7 +133,7 @@ CREATE TABLE IF NOT EXISTS businesses (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   description TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- OpenClaw session mapping
@@ -145,8 +146,8 @@ CREATE TABLE IF NOT EXISTS openclaw_sessions (
   session_type TEXT DEFAULT 'persistent',
   task_id TEXT REFERENCES tasks(id),
   ended_at TEXT,
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Task activities table (for real-time activity log)
@@ -157,7 +158,7 @@ CREATE TABLE IF NOT EXISTS task_activities (
   activity_type TEXT NOT NULL,
   message TEXT NOT NULL,
   metadata TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Task deliverables table (files, URLs, artifacts)
@@ -168,7 +169,7 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   title TEXT NOT NULL,
   path TEXT,
   description TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
+  created_at TIMESTAMP DEFAULT NOW()
 );
 
 -- Indexes for performance

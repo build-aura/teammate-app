@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryOne, queryAll } from '@/lib/db';
+import { queryAll } from '@/lib/db';
 
 interface OrchestraStatusResponse {
   hasOtherOrchestrators: boolean;
@@ -25,7 +25,7 @@ export async function GET(request: NextRequest) {
     const workspaceId = searchParams.get('workspace_id') || 'default';
 
     // Get all master agents in the workspace
-    const orchestrators = queryAll<{
+    const orchestrators = await queryAll<{
       id: string;
       name: string;
       role: string;
@@ -33,8 +33,8 @@ export async function GET(request: NextRequest) {
     }>(
       `SELECT id, name, role, status
        FROM agents
-       WHERE is_master = 1
-       AND workspace_id = ?
+       WHERE is_master = true
+       AND workspace_id = $1
        AND status != 'offline'
        ORDER BY created_at ASC`,
       [workspaceId]

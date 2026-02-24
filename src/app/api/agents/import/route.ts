@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check for conflicts (already imported)
-    const existingImports = queryAll<Agent>(
+    const existingImports = await queryAll<Agent>(
       `SELECT * FROM agents WHERE gateway_agent_id IS NOT NULL`
     );
     const importedGatewayIds = new Set(existingImports.map((a) => a.gateway_agent_id));
@@ -47,7 +47,7 @@ export async function POST(request: NextRequest) {
       skipped: [],
     };
 
-    transaction(() => {
+    await transaction(async (query) => {
       const now = new Date().toISOString();
 
       for (const agentReq of body.agents) {
@@ -63,16 +63,16 @@ export async function POST(request: NextRequest) {
         const id = uuidv4();
         const workspaceId = agentReq.workspace_id || 'default';
 
-        run(
+        await query(
           `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id, model, source, gateway_agent_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
           [
             id,
             agentReq.name,
             'Imported Agent',
             `Imported from OpenClaw Gateway (${agentReq.gateway_agent_id})`,
             '🔗',
-            0,
+            false,
             workspaceId,
             agentReq.model || null,
             'gateway',
@@ -83,15 +83,18 @@ export async function POST(request: NextRequest) {
         );
 
         // Log event
-        run(
+        await query(
           `INSERT INTO events (id, type, agent_id, message, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
+           VALUES ($1, $2, $3, $4, $5)`,
           [uuidv4(), 'agent_joined', id, `${agentReq.name} imported from OpenClaw Gateway`, now]
         );
 
-        const agent = queryOne<Agent>('SELECT * FROM agents WHERE id = ?', [id]);
-        if (agent) {
-          results.imported.push(agent);
+        const agentRows = await query(
+          'SELECT * FROM agents WHERE id = $1',
+          [id]
+        );
+        if (agentRows.rows && agentRows.rows.length > 0) {
+          results.imported.push(agentRows.rows[0] as Agent);
         }
       }
     });

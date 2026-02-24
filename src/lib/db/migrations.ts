@@ -1,18 +1,27 @@
 /**
- * Database Migrations System
- * 
+ * Database Migrations System (Postgres)
+ *
  * Handles schema changes in a production-safe way:
  * 1. Tracks which migrations have been applied
  * 2. Runs new migrations automatically on startup
  * 3. Never runs the same migration twice
  */
 
-import Database from 'better-sqlite3';
+import { Pool } from 'pg';
 
 interface Migration {
   id: string;
   name: string;
-  up: (db: Database.Database) => void;
+  up: (pool: Pool) => Promise<void>;
+}
+
+// Helper: check if a column exists on a table (replaces SQLite PRAGMA table_info)
+async function columnExists(pool: Pool, table: string, column: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1 FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
+    [table, column]
+  );
+  return result.rows.length > 0;
 }
 
 // All migrations in order - NEVER remove or reorder existing migrations
@@ -20,8 +29,8 @@ const migrations: Migration[] = [
   {
     id: '001',
     name: 'initial_schema',
-    up: (db) => {
-      // Core tables - these are created in schema.ts on fresh databases
+    up: async () => {
+      // Core tables are created in schema.ts on fresh databases
       // This migration exists to mark the baseline for existing databases
       console.log('[Migration 001] Baseline schema marker');
     }
@@ -29,41 +38,39 @@ const migrations: Migration[] = [
   {
     id: '002',
     name: 'add_workspaces',
-    up: (db) => {
+    up: async (pool) => {
       console.log('[Migration 002] Adding workspaces table and columns...');
-      
-      // Create workspaces table if not exists
-      db.exec(`
+
+      await pool.query(`
         CREATE TABLE IF NOT EXISTS workspaces (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
           slug TEXT NOT NULL UNIQUE,
           description TEXT,
           icon TEXT DEFAULT '📁',
-          created_at TEXT DEFAULT (datetime('now')),
-          updated_at TEXT DEFAULT (datetime('now'))
-        );
+          created_at TIMESTAMP DEFAULT NOW(),
+          updated_at TIMESTAMP DEFAULT NOW()
+        )
       `);
-      
+
       // Insert default workspace if not exists
-      db.exec(`
-        INSERT OR IGNORE INTO workspaces (id, name, slug, description, icon) 
-        VALUES ('default', 'Default Workspace', 'default', 'Default workspace', '🏠');
+      await pool.query(`
+        INSERT INTO workspaces (id, name, slug, description, icon)
+        VALUES ('default', 'Default Workspace', 'default', 'Default workspace', '🏠')
+        ON CONFLICT DO NOTHING
       `);
-      
+
       // Add workspace_id to tasks if not exists
-      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
-      if (!tasksInfo.some(col => col.name === 'workspace_id')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id)`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id)`);
+      if (!(await columnExists(pool, 'tasks', 'workspace_id'))) {
+        await pool.query(`ALTER TABLE tasks ADD COLUMN workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_tasks_workspace ON tasks(workspace_id)`);
         console.log('[Migration 002] Added workspace_id to tasks');
       }
-      
+
       // Add workspace_id to agents if not exists
-      const agentsInfo = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
-      if (!agentsInfo.some(col => col.name === 'workspace_id')) {
-        db.exec(`ALTER TABLE agents ADD COLUMN workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id)`);
-        db.exec(`CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id)`);
+      if (!(await columnExists(pool, 'agents', 'workspace_id'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN workspace_id TEXT DEFAULT 'default' REFERENCES workspaces(id)`);
+        await pool.query(`CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id)`);
         console.log('[Migration 002] Added workspace_id to agents');
       }
     }
@@ -71,11 +78,10 @@ const migrations: Migration[] = [
   {
     id: '003',
     name: 'add_planning_tables',
-    up: (db) => {
+    up: async (pool) => {
       console.log('[Migration 003] Adding planning tables...');
-      
-      // Create planning_questions table if not exists
-      db.exec(`
+
+      await pool.query(`
         CREATE TABLE IF NOT EXISTS planning_questions (
           id TEXT PRIMARY KEY,
           task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -86,68 +92,48 @@ const migrations: Migration[] = [
           answer TEXT,
           answered_at TEXT,
           sort_order INTEGER DEFAULT 0,
-          created_at TEXT DEFAULT (datetime('now'))
-        );
+          created_at TIMESTAMP DEFAULT NOW()
+        )
       `);
-      
-      // Create planning_specs table if not exists
-      db.exec(`
+
+      await pool.query(`
         CREATE TABLE IF NOT EXISTS planning_specs (
           id TEXT PRIMARY KEY,
           task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
           spec_markdown TEXT NOT NULL,
-          locked_at TEXT NOT NULL,
+          locked_at TIMESTAMP NOT NULL,
           locked_by TEXT,
-          created_at TEXT DEFAULT (datetime('now'))
-        );
+          created_at TIMESTAMP DEFAULT NOW()
+        )
       `);
-      
-      // Create index
-      db.exec(`CREATE INDEX IF NOT EXISTS idx_planning_questions_task ON planning_questions(task_id, sort_order)`);
-      
-      // Update tasks status check constraint to include 'planning'
-      // SQLite doesn't support ALTER CONSTRAINT, so we check if it's needed
-      const taskSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'").get() as { sql: string } | undefined;
-      if (taskSchema && !taskSchema.sql.includes("'planning'")) {
-        console.log('[Migration 003] Note: tasks table needs planning status - will be handled by schema recreation on fresh dbs');
-      }
+
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_planning_questions_task ON planning_questions(task_id, sort_order)`);
     }
   },
   {
     id: '004',
     name: 'add_planning_session_columns',
-    up: (db) => {
+    up: async (pool) => {
       console.log('[Migration 004] Adding planning session columns to tasks...');
 
-      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
-
-      // Add planning_session_key column
-      if (!tasksInfo.some(col => col.name === 'planning_session_key')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN planning_session_key TEXT`);
+      if (!(await columnExists(pool, 'tasks', 'planning_session_key'))) {
+        await pool.query(`ALTER TABLE tasks ADD COLUMN planning_session_key TEXT`);
         console.log('[Migration 004] Added planning_session_key');
       }
-
-      // Add planning_messages column (stores JSON array of messages)
-      if (!tasksInfo.some(col => col.name === 'planning_messages')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN planning_messages TEXT`);
+      if (!(await columnExists(pool, 'tasks', 'planning_messages'))) {
+        await pool.query(`ALTER TABLE tasks ADD COLUMN planning_messages TEXT`);
         console.log('[Migration 004] Added planning_messages');
       }
-
-      // Add planning_complete column
-      if (!tasksInfo.some(col => col.name === 'planning_complete')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN planning_complete INTEGER DEFAULT 0`);
+      if (!(await columnExists(pool, 'tasks', 'planning_complete'))) {
+        await pool.query(`ALTER TABLE tasks ADD COLUMN planning_complete BOOLEAN DEFAULT false`);
         console.log('[Migration 004] Added planning_complete');
       }
-
-      // Add planning_spec column (stores final spec JSON)
-      if (!tasksInfo.some(col => col.name === 'planning_spec')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN planning_spec TEXT`);
+      if (!(await columnExists(pool, 'tasks', 'planning_spec'))) {
+        await pool.query(`ALTER TABLE tasks ADD COLUMN planning_spec TEXT`);
         console.log('[Migration 004] Added planning_spec');
       }
-
-      // Add planning_agents column (stores generated agents JSON)
-      if (!tasksInfo.some(col => col.name === 'planning_agents')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN planning_agents TEXT`);
+      if (!(await columnExists(pool, 'tasks', 'planning_agents'))) {
+        await pool.query(`ALTER TABLE tasks ADD COLUMN planning_agents TEXT`);
         console.log('[Migration 004] Added planning_agents');
       }
     }
@@ -155,14 +141,11 @@ const migrations: Migration[] = [
   {
     id: '005',
     name: 'add_agent_model_field',
-    up: (db) => {
+    up: async (pool) => {
       console.log('[Migration 005] Adding model field to agents...');
 
-      const agentsInfo = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
-
-      // Add model column
-      if (!agentsInfo.some(col => col.name === 'model')) {
-        db.exec(`ALTER TABLE agents ADD COLUMN model TEXT`);
+      if (!(await columnExists(pool, 'agents', 'model'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN model TEXT`);
         console.log('[Migration 005] Added model to agents');
       }
     }
@@ -170,14 +153,11 @@ const migrations: Migration[] = [
   {
     id: '006',
     name: 'add_planning_dispatch_error_column',
-    up: (db) => {
+    up: async (pool) => {
       console.log('[Migration 006] Adding planning_dispatch_error column to tasks...');
 
-      const tasksInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
-
-      // Add planning_dispatch_error column
-      if (!tasksInfo.some(col => col.name === 'planning_dispatch_error')) {
-        db.exec(`ALTER TABLE tasks ADD COLUMN planning_dispatch_error TEXT`);
+      if (!(await columnExists(pool, 'tasks', 'planning_dispatch_error'))) {
+        await pool.query(`ALTER TABLE tasks ADD COLUMN planning_dispatch_error TEXT`);
         console.log('[Migration 006] Added planning_dispatch_error to tasks');
       }
     }
@@ -185,20 +165,15 @@ const migrations: Migration[] = [
   {
     id: '007',
     name: 'add_agent_source_and_gateway_id',
-    up: (db) => {
+    up: async (pool) => {
       console.log('[Migration 007] Adding source and gateway_agent_id to agents...');
 
-      const agentsInfo = db.prepare("PRAGMA table_info(agents)").all() as { name: string }[];
-
-      // Add source column: 'local' for MC-created, 'gateway' for imported from OpenClaw Gateway
-      if (!agentsInfo.some(col => col.name === 'source')) {
-        db.exec(`ALTER TABLE agents ADD COLUMN source TEXT DEFAULT 'local'`);
+      if (!(await columnExists(pool, 'agents', 'source'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN source TEXT DEFAULT 'local'`);
         console.log('[Migration 007] Added source to agents');
       }
-
-      // Add gateway_agent_id column: stores the original agent ID/name from the Gateway
-      if (!agentsInfo.some(col => col.name === 'gateway_agent_id')) {
-        db.exec(`ALTER TABLE agents ADD COLUMN gateway_agent_id TEXT`);
+      if (!(await columnExists(pool, 'agents', 'gateway_agent_id'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN gateway_agent_id TEXT`);
         console.log('[Migration 007] Added gateway_agent_id to agents');
       }
     }
@@ -208,40 +183,42 @@ const migrations: Migration[] = [
 /**
  * Run all pending migrations
  */
-export function runMigrations(db: Database.Database): void {
+export async function runMigrations(pool: Pool): Promise<void> {
   // Create migrations tracking table
-  db.exec(`
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS _migrations (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
-      applied_at TEXT DEFAULT (datetime('now'))
+      applied_at TIMESTAMP DEFAULT NOW()
     )
   `);
-  
+
   // Get already applied migrations
-  const applied = new Set(
-    (db.prepare('SELECT id FROM _migrations').all() as { id: string }[]).map(m => m.id)
-  );
-  
+  const { rows } = await pool.query('SELECT id FROM _migrations');
+  const applied = new Set(rows.map((m: { id: string }) => m.id));
+
   // Run pending migrations in order
   for (const migration of migrations) {
     if (applied.has(migration.id)) {
       continue;
     }
-    
+
     console.log(`[DB] Running migration ${migration.id}: ${migration.name}`);
-    
+
+    // Run migration in a transaction
+    const client = await pool.connect();
     try {
-      // Run migration in a transaction
-      db.transaction(() => {
-        migration.up(db);
-        db.prepare('INSERT INTO _migrations (id, name) VALUES (?, ?)').run(migration.id, migration.name);
-      })();
-      
+      await client.query('BEGIN');
+      await migration.up(pool);
+      await client.query('INSERT INTO _migrations (id, name) VALUES ($1, $2)', [migration.id, migration.name]);
+      await client.query('COMMIT');
       console.log(`[DB] Migration ${migration.id} completed`);
     } catch (error) {
+      await client.query('ROLLBACK');
       console.error(`[DB] Migration ${migration.id} failed:`, error);
       throw error;
+    } finally {
+      client.release();
     }
   }
 }
@@ -249,8 +226,9 @@ export function runMigrations(db: Database.Database): void {
 /**
  * Get migration status
  */
-export function getMigrationStatus(db: Database.Database): { applied: string[]; pending: string[] } {
-  const applied = (db.prepare('SELECT id FROM _migrations ORDER BY id').all() as { id: string }[]).map(m => m.id);
+export async function getMigrationStatus(pool: Pool): Promise<{ applied: string[]; pending: string[] }> {
+  const { rows } = await pool.query('SELECT id FROM _migrations ORDER BY id');
+  const applied = rows.map((m: { id: string }) => m.id);
   const pending = migrations.filter(m => !applied.includes(m.id)).map(m => m.id);
   return { applied, pending };
 }

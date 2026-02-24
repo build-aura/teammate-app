@@ -1,7 +1,7 @@
 // Database seed script - creates initial data including the master orchestrator agent
 
 import { v4 as uuidv4 } from 'uuid';
-import { getDb, closeDb } from './index';
+import { queryOne, run } from './index';
 
 const ORCHESTRATOR_SOUL_MD = `# Mission Control Orchestrator
 
@@ -91,33 +91,42 @@ If agents disagree:
 async function seed() {
   console.log('🌱 Seeding database...');
 
-  const db = getDb();
   const now = new Date().toISOString();
 
   // Create default business
   const businessId = 'default';
-  db.prepare(
-    `INSERT OR IGNORE INTO businesses (id, name, description, created_at) VALUES (?, ?, ?, ?)`
-  ).run(businessId, 'Mission Control HQ', 'Default workspace for all operations', now);
+  await run(
+    `INSERT INTO businesses (id, name, description, created_at) VALUES ($1, $2, $3, $4)
+     ON CONFLICT DO NOTHING`,
+    [businessId, 'Mission Control HQ', 'Default workspace for all operations', now]
+  );
+
+  // Create default workspace
+  await run(
+    `INSERT INTO workspaces (id, name, slug, description, icon) VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT DO NOTHING`,
+    ['default', 'Default Workspace', 'default', 'Default workspace', '🏠']
+  );
 
   // Create master orchestrator agent
   const orchestratorId = uuidv4();
-  db.prepare(
+  await run(
     `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, soul_md, user_md, agents_md, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    orchestratorId,
-    'Orchestrator',
-    'Team Lead & Orchestrator',
-    'The master orchestrator who coordinates all agents and manages the mission queue',
-    '🦞',
-    'standby',
-    1,
-    ORCHESTRATOR_SOUL_MD,
-    ORCHESTRATOR_USER_MD,
-    ORCHESTRATOR_AGENTS_MD,
-    now,
-    now
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    [
+      orchestratorId,
+      'Orchestrator',
+      'Team Lead & Orchestrator',
+      'The master orchestrator who coordinates all agents and manages the mission queue',
+      '🦞',
+      'standby',
+      true,
+      ORCHESTRATOR_SOUL_MD,
+      ORCHESTRATOR_USER_MD,
+      ORCHESTRATOR_AGENTS_MD,
+      now,
+      now,
+    ]
   );
 
   // Create some example agents
@@ -133,25 +142,28 @@ async function seed() {
   for (const agent of agents) {
     const agentId = uuidv4();
     agentIds.push(agentId);
-    db.prepare(
+    await run(
       `INSERT INTO agents (id, name, role, description, avatar_emoji, status, is_master, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(agentId, agent.name, agent.role, agent.desc, agent.emoji, 'standby', 0, now, now);
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [agentId, agent.name, agent.role, agent.desc, agent.emoji, 'standby', false, now, now]
+    );
   }
 
   // Create a team conversation
   const teamConvoId = uuidv4();
-  db.prepare(
+  await run(
     `INSERT INTO conversations (id, title, type, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(teamConvoId, 'Team Chat', 'group', now, now);
+     VALUES ($1, $2, $3, $4, $5)`,
+    [teamConvoId, 'Team Chat', 'group', now, now]
+  );
 
   // Add all agents to the team conversation
   for (const agentId of agentIds) {
-    db.prepare(
+    await run(
       `INSERT INTO conversation_participants (conversation_id, agent_id, joined_at)
-       VALUES (?, ?, ?)`
-    ).run(teamConvoId, agentId, now);
+       VALUES ($1, $2, $3)`,
+      [teamConvoId, agentId, now]
+    );
   }
 
   // Create some example tasks
@@ -167,37 +179,40 @@ async function seed() {
     const task = tasks[i];
     const assignedTo = task.status !== 'inbox' ? agentIds[i % agentIds.length] : null;
 
-    db.prepare(
-      `INSERT INTO tasks (id, title, status, priority, assigned_agent_id, created_by_agent_id, business_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(taskId, task.title, task.status, task.priority, assignedTo, orchestratorId, businessId, now, now);
+    await run(
+      `INSERT INTO tasks (id, title, status, priority, assigned_agent_id, created_by_agent_id, workspace_id, business_id, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [taskId, task.title, task.status, task.priority, assignedTo, orchestratorId, 'default', businessId, now, now]
+    );
   }
 
   // Create initial events
   const events = [
-    { type: 'system', message: 'Database seeded with initial data' },
+    { type: 'system', agentId: null, message: 'Database seeded with initial data' },
     { type: 'agent_joined', agentId: orchestratorId, message: 'Orchestrator joined the team' },
-    { type: 'system', message: 'Mission Control is online' },
+    { type: 'system', agentId: null, message: 'Mission Control is online' },
   ];
 
   for (const event of events) {
-    db.prepare(
+    await run(
       `INSERT INTO events (id, type, agent_id, message, created_at)
-       VALUES (?, ?, ?, ?, ?)`
-    ).run(uuidv4(), event.type, event.agentId || null, event.message, now);
+       VALUES ($1, $2, $3, $4, $5)`,
+      [uuidv4(), event.type, event.agentId, event.message, now]
+    );
   }
 
   // Add a welcome message from the orchestrator
-  db.prepare(
+  await run(
     `INSERT INTO messages (id, conversation_id, sender_agent_id, content, message_type, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(
-    uuidv4(),
-    teamConvoId,
-    orchestratorId,
-    "Welcome to Mission Control, team! 🦞 I'm your orchestrator. Let's get to work.",
-    'text',
-    now
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [
+      uuidv4(),
+      teamConvoId,
+      orchestratorId,
+      "Welcome to Mission Control, team! 🦞 I'm your orchestrator. Let's get to work.",
+      'text',
+      now,
+    ]
   );
 
   console.log('✅ Database seeded successfully!');
@@ -205,8 +220,6 @@ async function seed() {
   console.log(`   - Created ${agents.length} additional agents`);
   console.log(`   - Created ${tasks.length} sample tasks`);
   console.log(`   - Created team conversation`);
-
-  closeDb();
 }
 
 seed().catch(console.error);

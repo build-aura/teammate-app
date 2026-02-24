@@ -4,7 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { CreateActivitySchema } from '@/lib/validation';
 import type { TaskActivity } from '@/lib/types';
@@ -15,14 +15,13 @@ import type { TaskActivity } from '@/lib/types';
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const taskId = params.id;
-    const db = getDb();
+    const { id: taskId } = await params;
 
     // Get activities with agent info
-    const activities = db.prepare(`
+    const activities = await queryAll<any>(`
       SELECT 
         a.*,
         ag.id as agent_id,
@@ -30,12 +29,12 @@ export async function GET(
         ag.avatar_emoji as agent_avatar_emoji
       FROM task_activities a
       LEFT JOIN agents ag ON a.agent_id = ag.id
-      WHERE a.task_id = ?
+      WHERE a.task_id = $1
       ORDER BY a.created_at DESC
-    `).all(taskId) as any[];
+    `, [taskId]);
 
     // Transform to include agent object
-    const result: TaskActivity[] = activities.map(row => ({
+    const result: TaskActivity[] = activities.map((row: any) => ({
       id: row.id,
       task_id: row.task_id,
       agent_id: row.agent_id,
@@ -74,10 +73,10 @@ export async function GET(
  */
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const taskId = params.id;
+    const { id: taskId } = await params;
     const body = await request.json();
     
     // Validate input with Zod
@@ -91,24 +90,23 @@ export async function POST(
 
     const { activity_type, message, agent_id, metadata } = validation.data;
 
-    const db = getDb();
     const id = crypto.randomUUID();
 
     // Insert activity
-    db.prepare(`
+    await run(`
       INSERT INTO task_activities (id, task_id, agent_id, activity_type, message, metadata)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [
       id,
       taskId,
       agent_id || null,
       activity_type,
       message,
       metadata ? JSON.stringify(metadata) : null
-    );
+    ]);
 
     // Get the created activity with agent info
-    const activity = db.prepare(`
+    const activity = await queryOne<any>(`
       SELECT 
         a.*,
         ag.id as agent_id,
@@ -116,8 +114,8 @@ export async function POST(
         ag.avatar_emoji as agent_avatar_emoji
       FROM task_activities a
       LEFT JOIN agents ag ON a.agent_id = ag.id
-      WHERE a.id = ?
-    `).get(id) as any;
+      WHERE a.id = $1
+    `, [id]);
 
     const result: TaskActivity = {
       id: activity.id,

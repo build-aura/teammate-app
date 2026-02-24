@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { queryOne, run } from '@/lib/db';
 
 // GET /api/workspaces/[id] - Get a single workspace
 export async function GET(
@@ -9,12 +9,11 @@ export async function GET(
   const { id } = await params;
   
   try {
-    const db = getDb();
-    
     // Try to find by ID or slug
-    const workspace = db.prepare(
-      'SELECT * FROM workspaces WHERE id = ? OR slug = ?'
-    ).get(id, id);
+    const workspace = await queryOne(
+      'SELECT * FROM workspaces WHERE id = $1 OR slug = $2',
+      [id, id]
+    );
     
     if (!workspace) {
       return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });
@@ -38,10 +37,8 @@ export async function PATCH(
     const body = await request.json();
     const { name, description, icon } = body;
     
-    const db = getDb();
-    
     // Check workspace exists
-    const existing = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id);
+    const existing = await queryOne('SELECT * FROM workspaces WHERE id = $1', [id]);
     if (!existing) {
       return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });
     }
@@ -49,17 +46,18 @@ export async function PATCH(
     // Build update query dynamically
     const updates: string[] = [];
     const values: unknown[] = [];
+    let paramIndex = 1;
     
     if (name !== undefined) {
-      updates.push('name = ?');
+      updates.push(`name = $${paramIndex++}`);
       values.push(name);
     }
     if (description !== undefined) {
-      updates.push('description = ?');
+      updates.push(`description = $${paramIndex++}`);
       values.push(description);
     }
     if (icon !== undefined) {
-      updates.push('icon = ?');
+      updates.push(`icon = $${paramIndex++}`);
       values.push(icon);
     }
     
@@ -67,14 +65,15 @@ export async function PATCH(
       return NextResponse.json({ error: 'No fields to update' }, { status: 400 });
     }
     
-    updates.push("updated_at = datetime('now')");
+    updates.push(`updated_at = NOW()`);
     values.push(id);
     
-    db.prepare(`
-      UPDATE workspaces SET ${updates.join(', ')} WHERE id = ?
-    `).run(...values);
+    await run(
+      `UPDATE workspaces SET ${updates.join(', ')} WHERE id = $${paramIndex}`,
+      values
+    );
     
-    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id);
+    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [id]);
     return NextResponse.json(workspace);
   } catch (error) {
     console.error('Failed to update workspace:', error);
@@ -90,37 +89,37 @@ export async function DELETE(
   const { id } = await params;
   
   try {
-    const db = getDb();
-    
     // Don't allow deleting the default workspace
     if (id === 'default') {
       return NextResponse.json({ error: 'Cannot delete the default workspace' }, { status: 400 });
     }
     
     // Check workspace exists
-    const existing = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id);
+    const existing = await queryOne('SELECT * FROM workspaces WHERE id = $1', [id]);
     if (!existing) {
       return NextResponse.json({ error: 'Workspace not found' }, { status: 404 });
     }
     
     // Check if workspace has tasks or agents
-    const taskCount = db.prepare(
-      'SELECT COUNT(*) as count FROM tasks WHERE workspace_id = ?'
-    ).get(id) as { count: number };
+    const taskCount = await queryOne<{ count: number }>(
+      'SELECT COUNT(*) as count FROM tasks WHERE workspace_id = $1',
+      [id]
+    );
     
-    const agentCount = db.prepare(
-      'SELECT COUNT(*) as count FROM agents WHERE workspace_id = ?'
-    ).get(id) as { count: number };
+    const agentCount = await queryOne<{ count: number }>(
+      'SELECT COUNT(*) as count FROM agents WHERE workspace_id = $1',
+      [id]
+    );
     
-    if (taskCount.count > 0 || agentCount.count > 0) {
+    if ((taskCount?.count ?? 0) > 0 || (agentCount?.count ?? 0) > 0) {
       return NextResponse.json({ 
         error: 'Cannot delete workspace with existing tasks or agents',
-        taskCount: taskCount.count,
-        agentCount: agentCount.count
+        taskCount: taskCount?.count ?? 0,
+        agentCount: agentCount?.count ?? 0
       }, { status: 400 });
     }
     
-    db.prepare('DELETE FROM workspaces WHERE id = ?').run(id);
+    await run('DELETE FROM workspaces WHERE id = $1', [id]);
     
     return NextResponse.json({ success: true });
   } catch (error) {

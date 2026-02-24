@@ -81,14 +81,14 @@ export async function POST(
     const { id: taskId } = await params;
 
     // Get task
-    const task = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+    const task = await queryOne<Task>('SELECT * FROM tasks WHERE id = $1', [taskId]);
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 });
     }
 
     // Get all deliverables (file and url types)
-    const deliverables = queryAll<TaskDeliverable>(
-      'SELECT * FROM task_deliverables WHERE task_id = ? AND deliverable_type IN (?, ?)',
+    const deliverables = await queryAll<TaskDeliverable>(
+      'SELECT * FROM task_deliverables WHERE task_id = $1 AND deliverable_type IN ($2, $3)',
       [taskId, 'file', 'url']
     );
 
@@ -140,9 +140,9 @@ export async function POST(
       ? `Automated test passed - ${results.length} deliverable(s) verified, no issues found`
       : `Automated test failed - ${summary}`;
 
-    run(
+    await run(
       `INSERT INTO task_activities (id, task_id, activity_type, message, metadata, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       VALUES ($1, $2, $3, $4, $5, $6)`,
       [
         uuidv4(),
         taskId,
@@ -167,15 +167,15 @@ export async function POST(
 
     if (passed) {
       // Tests passed -> move to review for human approval
-      run(
-        'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
+      await run(
+        'UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3',
         ['review', now, taskId]
       );
       newStatus = 'review';
 
-      run(
+      await run(
         `INSERT INTO task_activities (id, task_id, activity_type, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES ($1, $2, $3, $4, $5)`,
         [
           uuidv4(),
           taskId,
@@ -186,15 +186,15 @@ export async function POST(
       );
     } else {
       // Tests failed -> move back to assigned for agent to fix
-      run(
-        'UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?',
+      await run(
+        'UPDATE tasks SET status = $1, updated_at = $2 WHERE id = $3',
         ['assigned', now, taskId]
       );
       newStatus = 'assigned';
 
-      run(
+      await run(
         `INSERT INTO task_activities (id, task_id, activity_type, message, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES ($1, $2, $3, $4, $5)`,
         [
           uuidv4(),
           taskId,
@@ -490,13 +490,13 @@ export async function GET(
 ) {
   const { id: taskId } = await params;
 
-  const task = queryOne<Task>('SELECT * FROM tasks WHERE id = ?', [taskId]);
+  const task = await queryOne<Task>('SELECT * FROM tasks WHERE id = $1', [taskId]);
   if (!task) {
     return NextResponse.json({ error: 'Task not found' }, { status: 404 });
   }
 
-  const deliverables = queryAll<TaskDeliverable>(
-    'SELECT * FROM task_deliverables WHERE task_id = ? AND deliverable_type IN (?, ?)',
+  const deliverables = await queryAll<TaskDeliverable>(
+    'SELECT * FROM task_deliverables WHERE task_id = $1 AND deliverable_type IN ($2, $3)',
     [taskId, 'file', 'url']
   );
 

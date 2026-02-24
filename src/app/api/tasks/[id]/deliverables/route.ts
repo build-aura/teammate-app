@@ -4,11 +4,10 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getDb } from '@/lib/db';
+import { queryAll, queryOne, run } from '@/lib/db';
 import { broadcast } from '@/lib/events';
 import { CreateDeliverableSchema } from '@/lib/validation';
 import { existsSync } from 'fs';
-import path from 'path';
 import type { TaskDeliverable } from '@/lib/types';
 
 /**
@@ -17,18 +16,17 @@ import type { TaskDeliverable } from '@/lib/types';
  */
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const taskId = params.id;
-    const db = getDb();
+    const { id: taskId } = await params;
 
-    const deliverables = db.prepare(`
+    const deliverables = await queryAll<TaskDeliverable>(`
       SELECT *
       FROM task_deliverables
-      WHERE task_id = ?
+      WHERE task_id = $1
       ORDER BY created_at DESC
-    `).all(taskId) as TaskDeliverable[];
+    `, [taskId]);
 
     return NextResponse.json(deliverables);
   } catch (error) {
@@ -46,10 +44,10 @@ export async function GET(
  */
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const taskId = params.id;
+    const { id: taskId } = await params;
     const body = await request.json();
     
     // Validate input with Zod
@@ -75,34 +73,35 @@ export async function POST(
       }
     }
 
-    const db = getDb();
     const id = crypto.randomUUID();
 
     // Insert deliverable
-    db.prepare(`
+    await run(`
       INSERT INTO task_deliverables (id, task_id, deliverable_type, title, path, description)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [
       id,
       taskId,
       deliverable_type,
       title,
       path || null,
       description || null
-    );
+    ]);
 
     // Get the created deliverable
-    const deliverable = db.prepare(`
+    const deliverable = await queryOne<TaskDeliverable>(`
       SELECT *
       FROM task_deliverables
-      WHERE id = ?
-    `).get(id) as TaskDeliverable;
+      WHERE id = $1
+    `, [id]);
 
     // Broadcast to SSE clients
-    broadcast({
-      type: 'deliverable_added',
-      payload: deliverable,
-    });
+    if (deliverable) {
+      broadcast({
+        type: 'deliverable_added',
+        payload: deliverable,
+      });
+    }
 
     // Return with warning if file doesn't exist
     if (deliverable_type === 'file' && !fileExists) {
