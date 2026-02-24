@@ -177,6 +177,129 @@ const migrations: Migration[] = [
         console.log('[Migration 007] Added gateway_agent_id to agents');
       }
     }
+  },
+  {
+    id: '100',
+    name: 'teammate_extensions',
+    up: async (pool) => {
+      console.log('[Migration 100] Adding Teammate.so extensions...');
+
+      // --- Extend agents table with Teammate.so fields ---
+
+      // Agent slug for URL-friendly names (e.g., /v1/agents/my-cs-bot/message)
+      if (!(await columnExists(pool, 'agents', 'slug'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN slug TEXT UNIQUE`);
+        console.log('[Migration 100] Added slug to agents');
+      }
+
+      // Framework: plain (Scout), crewai (Commander), letta (Sage), langgraph (Architect)
+      if (!(await columnExists(pool, 'agents', 'framework'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN framework TEXT DEFAULT 'plain'`);
+        console.log('[Migration 100] Added framework to agents');
+      }
+
+      // Character class for game UI: scout, commander, sage, architect, wildcard
+      if (!(await columnExists(pool, 'agents', 'character_class'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN character_class TEXT DEFAULT 'scout'`);
+        console.log('[Migration 100] Added character_class to agents');
+      }
+
+      // System prompt (separate from soul_md which is OpenClaw-specific)
+      if (!(await columnExists(pool, 'agents', 'system_prompt'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN system_prompt TEXT`);
+        console.log('[Migration 100] Added system_prompt to agents');
+      }
+
+      // Messaging style: natural (delays, typing indicators), instant, custom
+      if (!(await columnExists(pool, 'agents', 'messaging_style'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN messaging_style TEXT DEFAULT 'natural'`);
+        console.log('[Migration 100] Added messaging_style to agents');
+      }
+
+      // Per-agent messaging config (JSONB — Postgres validates JSON + enables querying)
+      if (!(await columnExists(pool, 'agents', 'messaging_config'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN messaging_config JSONB`);
+        console.log('[Migration 100] Added messaging_config to agents');
+      }
+
+      // Which template was used to create this agent
+      if (!(await columnExists(pool, 'agents', 'template_id'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN template_id TEXT`);
+        console.log('[Migration 100] Added template_id to agents');
+      }
+
+      // Deployment status (separate from operational status which uses 'status' column)
+      // 'active' = deployed and running, 'deploying' = in progress, 'error' = deploy failed, 'inactive' = stopped
+      if (!(await columnExists(pool, 'agents', 'deploy_status'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN deploy_status TEXT DEFAULT 'active' CHECK (deploy_status IN ('active', 'inactive', 'error', 'deploying'))`);
+        console.log('[Migration 100] Added deploy_status to agents');
+      }
+
+      // Last error message (for deploy_status = 'error')
+      if (!(await columnExists(pool, 'agents', 'last_error'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN last_error TEXT`);
+        console.log('[Migration 100] Added last_error to agents');
+      }
+
+      // When the agent was deployed to OpenClaw
+      if (!(await columnExists(pool, 'agents', 'deployed_at'))) {
+        await pool.query(`ALTER TABLE agents ADD COLUMN deployed_at TIMESTAMP`);
+        console.log('[Migration 100] Added deployed_at to agents');
+      }
+
+      // --- New tables ---
+
+      // API keys — keys stored as SHA-256 hash, never plaintext
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS api_keys (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          key_hash TEXT NOT NULL UNIQUE,
+          key_prefix TEXT NOT NULL,
+          name TEXT NOT NULL DEFAULT 'default',
+          active BOOLEAN NOT NULL DEFAULT true,
+          rate_limit_rpm INTEGER DEFAULT 60,
+          last_used_at TIMESTAMP,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_api_keys_agent ON api_keys(agent_id)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)`);
+
+      // Message log (for agent stats, billing, battle log in game UI)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS message_log (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
+          agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+          content TEXT,
+          channel TEXT,
+          session_id TEXT,
+          latency_ms INTEGER,
+          error TEXT,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_message_log_agent_created ON message_log(agent_id, created_at DESC)`);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_message_log_agent_direction ON message_log(agent_id, direction)`);
+
+      // Agent templates registry (one-click deploy configs)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS agent_templates (
+          id TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
+          name TEXT NOT NULL,
+          slug TEXT NOT NULL UNIQUE,
+          framework TEXT NOT NULL,
+          character_class TEXT NOT NULL,
+          version TEXT NOT NULL DEFAULT '1.0.0',
+          config JSONB NOT NULL,
+          created_at TIMESTAMP DEFAULT NOW()
+        )
+      `);
+      await pool.query(`CREATE INDEX IF NOT EXISTS idx_agent_templates_framework ON agent_templates(framework)`);
+
+      console.log('[Migration 100] Teammate.so extensions complete');
+    }
   }
 ];
 

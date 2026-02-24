@@ -38,6 +38,17 @@ CREATE TABLE IF NOT EXISTS agents (
   model TEXT,
   source TEXT DEFAULT 'local',
   gateway_agent_id TEXT,
+  -- Teammate.so extensions
+  slug TEXT UNIQUE,
+  framework TEXT DEFAULT 'plain',
+  character_class TEXT DEFAULT 'scout',
+  system_prompt TEXT,
+  messaging_style TEXT DEFAULT 'natural',
+  messaging_config JSONB,
+  template_id TEXT,
+  deploy_status TEXT DEFAULT 'active' CHECK (deploy_status IN ('active', 'inactive', 'error', 'deploying')),
+  last_error TEXT,
+  deployed_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT NOW(),
   updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -172,6 +183,44 @@ CREATE TABLE IF NOT EXISTS task_deliverables (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- API keys (Teammate.so) — keys stored as SHA-256 hash, never plaintext
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  key_hash TEXT NOT NULL UNIQUE,
+  key_prefix TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT 'default',
+  active BOOLEAN NOT NULL DEFAULT true,
+  rate_limit_rpm INTEGER DEFAULT 60,
+  last_used_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Message log (Teammate.so) — for agent stats, billing, battle log
+CREATE TABLE IF NOT EXISTS message_log (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+  content TEXT,
+  channel TEXT,
+  session_id TEXT,
+  latency_ms INTEGER,
+  error TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Agent templates registry (Teammate.so) — one-click deploy configs
+CREATE TABLE IF NOT EXISTS agent_templates (
+  id TEXT PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  framework TEXT NOT NULL,
+  character_class TEXT NOT NULL,
+  version TEXT NOT NULL DEFAULT '1.0.0',
+  config JSONB NOT NULL,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_agent_id);
@@ -184,4 +233,9 @@ CREATE INDEX IF NOT EXISTS idx_activities_task ON task_activities(task_id, creat
 CREATE INDEX IF NOT EXISTS idx_deliverables_task ON task_deliverables(task_id);
 CREATE INDEX IF NOT EXISTS idx_openclaw_sessions_task ON openclaw_sessions(task_id);
 CREATE INDEX IF NOT EXISTS idx_planning_questions_task ON planning_questions(task_id, sort_order);
+CREATE INDEX IF NOT EXISTS idx_api_keys_agent ON api_keys(agent_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_message_log_agent_created ON message_log(agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_message_log_agent_direction ON message_log(agent_id, direction);
+CREATE INDEX IF NOT EXISTS idx_agent_templates_framework ON agent_templates(framework);
 `;
