@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { v4 as uuidv4 } from 'uuid';
 import { queryAll, queryOne, run } from '@/lib/db';
+import { createOpenClawAgent } from '@/lib/openclaw/sync';
 import type { Agent, CreateAgentRequest } from '@/lib/types';
 
 // GET /api/agents - List all agents
@@ -25,6 +26,15 @@ export async function GET(request: NextRequest) {
   }
 }
 
+// Generate a URL-safe slug from a name
+function generateSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 50) || 'agent';
+}
+
 // POST /api/agents - Create a new agent
 export async function POST(request: NextRequest) {
   try {
@@ -36,10 +46,19 @@ export async function POST(request: NextRequest) {
 
     const id = uuidv4();
     const now = new Date().toISOString();
+    const slug = body.slug || generateSlug(body.name);
+    const framework = body.framework || 'plain';
+    const characterClass = body.character_class || 'scout';
+    const syncToOpenClaw = body.sync_to_openclaw ?? false;
+
+    // Insert agent with deploy_status based on whether we'll sync
+    const deployStatus = syncToOpenClaw ? 'deploying' : 'active';
 
     await run(
-      `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id, soul_md, user_md, agents_md, model, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      `INSERT INTO agents (id, name, role, description, avatar_emoji, is_master, workspace_id,
+        soul_md, user_md, agents_md, model, slug, framework, character_class, system_prompt,
+        deploy_status, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)`,
       [
         id,
         body.name,
@@ -52,10 +71,39 @@ export async function POST(request: NextRequest) {
         body.user_md || null,
         body.agents_md || null,
         body.model || null,
+        slug,
+        framework,
+        characterClass,
+        body.system_prompt || null,
+        deployStatus,
         now,
         now,
       ]
     );
+
+    // Sync to OpenClaw if requested
+    if (syncToOpenClaw) {
+      const syncResult = await createOpenClawAgent({
+        slug,
+        name: body.name,
+        model: body.model,
+        systemPrompt: body.system_prompt,
+        framework,
+        description: body.description,
+      });
+
+      if (syncResult.success) {
+        await run(
+          `UPDATE agents SET deploy_status = 'active', gateway_agent_id = $1, deployed_at = NOW() WHERE id = $2`,
+          [syncResult.gatewayAgentId || slug, id]
+        );
+      } else {
+        await run(
+          `UPDATE agents SET deploy_status = 'error', last_error = $1 WHERE id = $2`,
+          [syncResult.error || 'Unknown sync error', id]
+        );
+      }
+    }
 
     // Log event
     await run(

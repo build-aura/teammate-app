@@ -22,6 +22,10 @@ export type EventType =
 
 export type AgentSource = 'local' | 'gateway';
 
+export type DeployStatus = 'active' | 'inactive' | 'error' | 'deploying';
+export type AgentFramework = 'plain' | 'crewai' | 'letta' | 'langgraph' | 'custom';
+export type CharacterClass = 'scout' | 'commander' | 'sage' | 'architect' | 'wildcard';
+
 export interface Agent {
   id: string;
   name: string;
@@ -37,6 +41,17 @@ export interface Agent {
   model?: string;
   source: AgentSource;
   gateway_agent_id?: string;
+  // Teammate.so extensions
+  slug?: string;
+  framework?: AgentFramework;
+  character_class?: CharacterClass;
+  system_prompt?: string;
+  messaging_style?: string;
+  messaging_config?: Record<string, unknown>;
+  template_id?: string;
+  deploy_status?: DeployStatus;
+  last_error?: string;
+  deployed_at?: string;
   created_at: string;
   updated_at: string;
 }
@@ -244,6 +259,12 @@ export interface CreateAgentRequest {
   user_md?: string;
   agents_md?: string;
   model?: string;
+  // Teammate.so extensions
+  slug?: string;
+  framework?: AgentFramework;
+  character_class?: CharacterClass;
+  system_prompt?: string;
+  sync_to_openclaw?: boolean;
 }
 
 export interface UpdateAgentRequest extends Partial<CreateAgentRequest> {
